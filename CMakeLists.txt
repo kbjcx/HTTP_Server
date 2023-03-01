@@ -3,8 +3,9 @@ project(HTTP_Server)
 
 set(CMAKE_CXX_STANDARD 11)
 
+link_libraries(pthread)
 include_directories(./)
 
-set(server locker.cpp thread_pool.cpp)
+set(server main.cpp locker.cpp http_connection.cpp)
 
-add_executable(HTTP_Server ${server})
+add_executable(server ${server})
