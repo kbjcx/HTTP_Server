@@ -26,10 +26,11 @@ ContinuationIndentWidth: 4
 AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: false
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+BinPackArguments: true
+BinPackParameters: true
 AlwaysBreakBeforeMultilineStrings: true
 AlwaysBreakTemplateDeclarations: Yes
-BinPackParameters: false
-BinPackArguments: false
 BreakBeforeBraces: Custom
 BraceWrapping:
   BeforeElse: true

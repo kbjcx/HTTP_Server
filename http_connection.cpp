@@ -1,6 +1,7 @@
 
 #include "http_connection.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <unistd.h>
@@ -16,11 +17,17 @@ void set_no_blocking(int fd) {
     fcntl(fd, F_SETFL, flags);
 }
 
-void addfd(int epoll_fd, int fd, bool one_shot) {
+void addfd(int epoll_fd, int fd, bool one_shot, bool ET = true) {
     epoll_event event{};
     event.data.fd = fd;
     // 监听读和异常断开
-    event.events = EPOLLIN | EPOLLRDHUP;
+    if (ET) {
+        event.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
+    }
+    else {
+        event.events = EPOLLIN | EPOLLRDHUP;
+    }
+    
     if (one_shot) {
         event.events |= EPOLLONESHOT;
     }
@@ -65,7 +72,33 @@ void HTTPConnection::close_connection() {
 }
 
 bool HTTPConnection::read() {
-    printf("一次性睇完数据\n");
+    // printf("一次性睇完数据\n");
+    // 缓冲区大小不够
+    if (read_index >= READ_BUFFER_SIZE) {
+        return false;
+    }
+    // 读取到的字节
+    int read_bytes;
+    while (true) {
+        // 循环读取
+        read_bytes = recv(sock_fd, read_buffer + read_index,
+                          READ_BUFFER_SIZE - read_index, 0);
+        if (read_bytes == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // 没有数据
+                break;
+            }
+            return false;
+        }
+        else if (read_bytes == 0) {
+            // 对方关闭连接
+            return false;
+        }
+        else {
+            read_index += read_bytes;
+        }
+    }
+    printf("读取到了数据: %s\n", read_buffer);
     return true;
 }
 

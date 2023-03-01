@@ -18,6 +18,9 @@
 #define MAX_FD 65535
 #define MAX_EVENTS 10000
 
+extern void addfd(int epoll_fd, int fd, bool one_shot, bool ET);
+extern void delfd(int epoll_fd, int fd);
+
 void add_sig(int sig, void (*handler)(int)) {
     struct sigaction sa;
     bzero(&sa, sizeof(sa));
@@ -26,9 +29,6 @@ void add_sig(int sig, void (*handler)(int)) {
     sigfillset(&sa.sa_mask);
     sigaction(sig, &sa, nullptr);
 }
-
-extern void addfd(int epoll_fd, int fd, bool one_shot);
-extern void delfd(int epoll_fd, int fd);
 
 int main(int argc, char* argv[]) {
     if (argc <= 1) {
@@ -65,9 +65,8 @@ int main(int argc, char* argv[]) {
     bzero(&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = atoi(argv[1]);
-    if (bind(server_sockfd,
-             (struct sockaddr*) &server_addr,
+    server_addr.sin_port = htons(atoi(argv[1]));
+    if (bind(server_sockfd, (struct sockaddr*) &server_addr,
              sizeof(server_addr)) == -1) {
         perror("bind error");
         exit(-1);
@@ -83,7 +82,7 @@ int main(int argc, char* argv[]) {
     int epoll_fd = epoll_create(1);
 
     // 添加文件描述符
-    addfd(epoll_fd, server_sockfd, false);
+    addfd(epoll_fd, server_sockfd, false, false);
     HTTPConnection::epoll_fd = epoll_fd;
 
     while (true) {
@@ -99,9 +98,9 @@ int main(int argc, char* argv[]) {
                 // 有新客户端连接
                 sockaddr_in client_addr{};
                 socklen_t client_addr_len = sizeof(client_addr);
-                int client_fd = accept(server_sockfd,
-                                       (struct sockaddr*) &client_addr,
-                                       &client_addr_len);
+                int client_fd =
+                    accept(server_sockfd, (struct sockaddr*) &client_addr,
+                           &client_addr_len);
                 if (client_fd == -1) {
                     perror("accept error");
                     continue;

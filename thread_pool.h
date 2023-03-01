@@ -58,7 +58,7 @@ ThreadPool<T>::ThreadPool(int _thread_num, int _max_request_num)
 
     // 创建线程
     for (int i = 0; i < thread_num; ++i) {
-        printf("create the %dth thread", i);
+        printf("create the %dth thread\n", i);
         if (pthread_create(&m_threads[i], nullptr, worker, this) != 0) {
             delete[] m_threads;
             throw std::exception();
