@@ -6,6 +6,8 @@
 
 #include <string>
 #include <iostream>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 class HTTPConnection {
 public:
@@ -60,12 +62,19 @@ private:
     Method method;
     std::string url;
     std::string version;
+    int content_length_;
+    bool keep_alive_;
+    std::string host_;
+    std::string real_file_;
+    struct stat file_stat_;
+    // 内存映射首地址
+    char* file_address_;
 private:
     void init();
     HttpCode parse_process(); // 解析请求
-    HttpCode parse_request(std::string text); // 解析请求首行
-    HttpCode parse_header(char* text); // 解析请求头
-    HttpCode parse_content(char* text); // 解析请求体
+    HttpCode parse_request(const std::string& text); // 解析请求首行
+    HttpCode parse_header(const std::string& text); // 解析请求头
+    HttpCode parse_content(const std::string& text); // 解析请求体
     
     LineStatus parse_line(); // 获取一行的数据选择交给请求行、请求头还是请求体
     inline char* get_line();

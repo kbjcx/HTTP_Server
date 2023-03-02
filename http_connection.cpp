@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <regex>
 
+const char* RootPath = "/home/llz/CPP/resources";
+
 int HTTPConnection::epoll_fd = -1;
 int HTTPConnection::user_count = 0;
 
@@ -82,6 +84,11 @@ void HTTPConnection::init() {
     method = GET;
     url = "";
     version = "";
+    keep_alive_ = false;
+    content_length_ = 0;
+    host_ = "";
+    real_file_ = "";
+    file_address_ = nullptr;
 }
 
 void HTTPConnection::close_connection() {
@@ -146,7 +153,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_process() {
 
     char* text = nullptr;
     while ((line_status = parse_line()) == LINE_OK ||
-           check_state == CHECK_STATE_CONTENT) {
+           (check_state == CHECK_STATE_CONTENT && line_status == LINE_OK)) {
         text = get_line();
         line_start = check_index;
         printf("got one http line: %s\n", text);
@@ -166,6 +173,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_process() {
                 else if (ret == GET_REQUEST) {
                     do_request();
                 }
+                break ;
             }
             case CHECK_STATE_CONTENT: {
                 ret = parse_content(text);
@@ -188,6 +196,27 @@ char* HTTPConnection::get_line() {
 }
 
 HTTPConnection::HttpCode HTTPConnection::do_request() {
+    printf("do request\n");
+    real_file_ = RootPath + url;
+    // 获取文件相关状态信息
+    if (stat(real_file_.c_str(), &file_stat_) == -1) {
+        return NO_RESOURCE;
+    }
+    // 判断访问权限
+    if (!(file_stat_.st_mode & S_IROTH)) {
+        return FORBIDDEN_REQUEST;
+    }
+    
+    // 判断是否是目录
+    if (S_ISDIR(file_stat_.st_mode)) {
+        return BAD_REQUEST;
+    }
+    //以只读方式打开文件
+    int fd = open(real_file_.c_str(), O_RDONLY);
+    //创建内存映射
+    file_address_ = (char*) mmap(0, file_stat_.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    return FILE_REQUEST;
 }
 
 HTTPConnection::LineStatus HTTPConnection::parse_line() {
@@ -220,7 +249,8 @@ HTTPConnection::LineStatus HTTPConnection::parse_line() {
     return LINE_OPEN;
 }
 
-HTTPConnection::HttpCode HTTPConnection::parse_request(std::string text) {
+HTTPConnection::HttpCode HTTPConnection::parse_request(
+    const std::string& text) {
     // GET /index.html HTTP/1.1
     std::regex reg("^([^\\s])*\\s([^\\s])*\\sHTTP/([^\\s])*");
     if (!std::regex_match(text, reg)) {
@@ -241,7 +271,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_request(std::string text) {
     }
     std::cout << method << std::endl;
     // 获取url，条件是以/开始的后面紧跟空格的字符串，排除了版本号
-    if (std::regex_search(text, result, std::regex("/([^\\s]*(?=\\s))"))) {
+    if (std::regex_search(text, result, std::regex("/([^\\s]*(?=\\s|\t))"))) {
         url = result[0];
     }
     else {
@@ -249,7 +279,6 @@ HTTPConnection::HttpCode HTTPConnection::parse_request(std::string text) {
     }
     std::cout << url << std::endl;
     // 获取版本号，条件是以HTTP/开头的1.0或1.1
-    // TODO 匹配其他版本号
     if (std::regex_search(text, result, std::regex("HTTP/1\\.[0|1]$"))) {
         version = result[0];
     }
@@ -261,11 +290,65 @@ HTTPConnection::HttpCode HTTPConnection::parse_request(std::string text) {
     return NO_REQUEST;
 }
 
-HTTPConnection::HttpCode HTTPConnection::parse_header(char* text) {
-    check_state = CHECK_STATE_CONTENT;
-    return NO_REQUEST;
+HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
+    std::cout << text.size() << std::endl;
+    if (text.size() == 0) {
+        // 空行，请求头结束
+        // 如果存在消息体可以读
+        if (content_length_ > 0) {
+            check_state = CHECK_STATE_CONTENT;
+            return NO_REQUEST;
+        }
+        else {
+            // 没有消息体则说明已读完
+            return GET_REQUEST;
+        }
+    }
+    else {
+        std::smatch key;
+        if (std::regex_search(text, key, std::regex("^[^\\s]*(?=:)"))) {
+            std::smatch value;
+            if (key[0] == "Connection") {
+                if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
+                    if (value.str() == "keep-alive") {
+                        keep_alive_ = true;
+                        std::cout << text << std::endl;
+                    }
+                }
+                else {
+                    return BAD_REQUEST;
+                }
+            }
+            else if (key[0] == "Content-Length") {
+                if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
+                    content_length_ = atol(value.str().c_str());
+                    std::cout << text << std::endl;
+                }
+                else {
+                    return BAD_REQUEST;
+                }
+            }
+            else if (key.str() == "Host") {
+                if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
+                    host_ = value.str();
+                    std::cout << text << std::endl;
+                }
+                else {
+                    return BAD_REQUEST;
+                }
+            }
+            else {
+                printf("Oops! Unknown header: %s\n", text.c_str());
+            }
+        }
+        else {
+            return BAD_REQUEST;
+        }
+        
+    }
 }
 
-HTTPConnection::HttpCode HTTPConnection::parse_content(char* text) {
-    return NO_REQUEST;
+HTTPConnection::HttpCode HTTPConnection::parse_content(
+    const std::string& text) {
+    return GET_REQUEST;
 }
