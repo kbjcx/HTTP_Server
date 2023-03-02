@@ -7,9 +7,21 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <regex>
 
 int HTTPConnection::epoll_fd = -1;
 int HTTPConnection::user_count = 0;
+
+bool ignore_case_compare(const std::string& str1, const std::string& str2) {
+    if (str1.size() == str2.size()) {
+        return std::equal(
+            str1.begin(), str1.end(), str2.begin(),
+            [](char a, char b) { return tolower(a) == tolower(b); });
+    }
+    else {
+        return false;
+    }
+}
 
 void set_no_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL);
@@ -27,7 +39,7 @@ void addfd(int epoll_fd, int fd, bool one_shot, bool ET = true) {
     else {
         event.events = EPOLLIN | EPOLLRDHUP;
     }
-    
+
     if (one_shot) {
         event.events |= EPOLLONESHOT;
     }
@@ -61,6 +73,15 @@ void HTTPConnection::init(int _fd, sockaddr_in& _addr) {
     // 添加到epoll_fd中
     addfd(epoll_fd, sock_fd, true);
     ++user_count;
+}
+
+void HTTPConnection::init() {
+    check_state = CHECK_STATE_REQUESTLINE;
+    line_start = 0;
+    check_index = 0;
+    method = GET;
+    url = "";
+    version = "";
 }
 
 void HTTPConnection::close_connection() {
@@ -110,6 +131,141 @@ bool HTTPConnection::write() {
 void HTTPConnection::process() {
     // 交给线程池处理HTTP请求
     // 解析HTTP请求
+    HttpCode ret = parse_process();
+    if (ret == NO_REQUEST) {
+        modfd(epoll_fd, sock_fd, EPOLLIN);
+        return;
+    }
     // 生成HTTP相应
     printf("parse request, create response\n");
+}
+
+HTTPConnection::HttpCode HTTPConnection::parse_process() {
+    LineStatus line_status = LINE_OK;
+    HttpCode ret = NO_REQUEST;
+
+    char* text = nullptr;
+    while ((line_status = parse_line()) == LINE_OK ||
+           check_state == CHECK_STATE_CONTENT) {
+        text = get_line();
+        line_start = check_index;
+        printf("got one http line: %s\n", text);
+        switch (check_state) {
+            case CHECK_STATE_REQUESTLINE: {
+                ret = parse_request(text);
+                if (ret == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                }
+                break;
+            }
+            case CHECK_STATE_HEADER: {
+                ret = parse_header(text);
+                if (ret == BAD_REQUEST) {
+                    return BAD_REQUEST;
+                }
+                else if (ret == GET_REQUEST) {
+                    do_request();
+                }
+            }
+            case CHECK_STATE_CONTENT: {
+                ret = parse_content(text);
+                if (ret == GET_REQUEST) {
+                    do_request();
+                }
+                line_status = LINE_OPEN;
+                break;
+            }
+            default: {
+                return INTERNAL_ERROR;
+            }
+        }
+    }
+    return NO_REQUEST;
+}
+
+char* HTTPConnection::get_line() {
+    return read_buffer + line_start;
+}
+
+HTTPConnection::HttpCode HTTPConnection::do_request() {
+}
+
+HTTPConnection::LineStatus HTTPConnection::parse_line() {
+    char temp;
+    for (; check_index < read_index; ++check_index) {
+        temp = read_buffer[check_index];
+        if (temp == '\r') {
+            if (check_index + 1 == read_index) {
+                return LINE_OPEN;
+            }
+            else if (read_buffer[check_index + 1] == '\n') {
+                read_buffer[check_index] = '\0';
+                ++check_index;
+                read_buffer[check_index] = '\0';
+                ++check_index;
+                return LINE_OK;
+            }
+            return LINE_BAD;
+        }
+        else if (temp == '\n') {
+            if (check_index > 0 && read_buffer[check_index - 1] == '\r') {
+                read_buffer[check_index - 1] = '\0';
+                read_buffer[check_index] = '\0';
+                ++check_index;
+                return LINE_OK;
+            }
+            return LINE_BAD;
+        }
+    }
+    return LINE_OPEN;
+}
+
+HTTPConnection::HttpCode HTTPConnection::parse_request(std::string text) {
+    // GET /index.html HTTP/1.1
+    std::regex reg("^([^\\s])*\\s([^\\s])*\\sHTTP/([^\\s])*");
+    if (!std::regex_match(text, reg)) {
+        return BAD_REQUEST;
+    }
+    // 判断开头方法是否为GET
+    std::smatch result;
+    if (std::regex_search(text, result, std::regex("^([^\\s])*"))) {
+        if (!ignore_case_compare(result.str(), "GET")) {
+            return BAD_REQUEST;
+        }
+        else {
+            method = GET;
+        }
+    }
+    else {
+        return BAD_REQUEST;
+    }
+    std::cout << method << std::endl;
+    // 获取url，条件是以/开始的后面紧跟空格的字符串，排除了版本号
+    if (std::regex_search(text, result, std::regex("/([^\\s]*(?=\\s))"))) {
+        url = result[0];
+    }
+    else {
+        return BAD_REQUEST;
+    }
+    std::cout << url << std::endl;
+    // 获取版本号，条件是以HTTP/开头的1.0或1.1
+    // TODO 匹配其他版本号
+    if (std::regex_search(text, result, std::regex("HTTP/1\\.[0|1]$"))) {
+        version = result[0];
+    }
+    else {
+        return BAD_REQUEST;
+    }
+    std::cout << version << std::endl;
+    check_state = CHECK_STATE_HEADER;
+    return NO_REQUEST;
+}
+
+HTTPConnection::HttpCode HTTPConnection::parse_header(char* text) {
+    check_state = CHECK_STATE_CONTENT;
+    return NO_REQUEST;
+}
+
+HTTPConnection::HttpCode HTTPConnection::parse_content(char* text) {
+    return NO_REQUEST;
 }

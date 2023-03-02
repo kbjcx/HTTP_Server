@@ -45,6 +45,7 @@ BraceWrapping:
   AfterUnion: false
 NamespaceIndentation: All
 BreakConstructorInitializersBeforeComma: true
+AllowShortEnumsOnASingleLine: true
 PointerAlignment: Left
 IndentWidth: 4
 TabWidth: 4
