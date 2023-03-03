@@ -11,6 +11,21 @@
 
 const char* RootPath = "/home/llz/CPP/resources";
 
+// 定义HTTP响应的一些状态信息
+const char* ok_200_title = "OK";
+const char* error_400_title = "Bad Request";
+const char* error_400_form =
+    "Your request has bad syntax or is inherently impossible to satisfy.\n";
+const char* error_403_title = "Forbidden";
+const char* error_403_form =
+    "You do not have permission to get file from this server.\n";
+const char* error_404_title = "Not Found";
+const char* error_404_form =
+    "The requested file was not found on this server.\n";
+const char* error_500_title = "Internal Error";
+const char* error_500_form =
+    "There was an unusual problem serving the requested file.\n";
+
 int HTTPConnection::epoll_fd = -1;
 int HTTPConnection::user_count = 0;
 
@@ -75,6 +90,7 @@ void HTTPConnection::init(int _fd, sockaddr_in& _addr) {
     // 添加到epoll_fd中
     addfd(epoll_fd, sock_fd, true);
     ++user_count;
+    init();
 }
 
 void HTTPConnection::init() {
@@ -89,6 +105,14 @@ void HTTPConnection::init() {
     host_ = "";
     real_file_ = "";
     file_address_ = nullptr;
+    write_index = 0;
+    read_index = 0;
+    bytes_to_send = 0;
+    bytes_have_send = 0;
+    io_vec_count = 0;
+    bzero(io_vec_, sizeof(*io_vec_) * 2);
+    bzero(read_buffer, READ_BUFFER_SIZE);
+    bzero(write_buffer, WRITE_BUFFER_SIZE);
 }
 
 void HTTPConnection::close_connection() {
@@ -131,20 +155,71 @@ bool HTTPConnection::read() {
 }
 
 bool HTTPConnection::write() {
-    printf("一次性写完数据\n");
-    return true;
+    int temp = 0;
+    if (bytes_to_send == 0) {
+        // 响应结束
+        modfd(epoll_fd, sock_fd, EPOLLIN);
+        init();
+        return true;
+    }
+    while (true) {
+        // 聚集写
+        temp = writev(sock_fd, io_vec_, io_vec_count);
+        if (temp <= -1) {
+            // 如果TCP写缓冲没有空间，则等待下一轮EPOLLOUT事件，虽然在此期间，
+            // 服务器无法立即接收到同一客户的下一个请求，但可以保证连接的完整性。
+            if (errno == EAGAIN) {
+                modfd(epoll_fd, sock_fd, EPOLLOUT);
+                return true;
+            }
+            unmap();
+            return false;
+        }
+        else {
+            // 判断响应头有没有发送完
+            if (bytes_have_send >= io_vec_[0].iov_len) {
+                io_vec_[0].iov_len = 0;
+                // write_index表示减去响应头的长度
+                io_vec_[1].iov_base = file_address_ + (bytes_have_send - write_index);
+                io_vec_[1].iov_len = bytes_to_send - bytes_have_send;
+            }
+            else {
+                io_vec_[0].iov_base = write_buffer + bytes_have_send;
+                io_vec_[0].iov_len = write_index - bytes_have_send;
+            }
+            bytes_have_send += temp;
+            if (bytes_have_send >= bytes_to_send) {
+                // 响应成功
+                unmap();
+                modfd(epoll_fd, sock_fd, EPOLLIN);
+                if (keep_alive_) {
+                    init();
+                    return true;
+                }
+                else {
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 void HTTPConnection::process() {
     // 交给线程池处理HTTP请求
     // 解析HTTP请求
-    HttpCode ret = parse_process();
-    if (ret == NO_REQUEST) {
+    HttpCode read_ret = parse_process();
+    if (read_ret == NO_REQUEST) {
         modfd(epoll_fd, sock_fd, EPOLLIN);
         return;
     }
     // 生成HTTP相应
-    printf("parse request, create response\n");
+    bool write_ret = response_process(read_ret);
+    if (!write_ret) {
+        close_connection();
+    }
+    else {
+        modfd(epoll_fd, sock_fd, EPOLLOUT);
+    }
 }
 
 HTTPConnection::HttpCode HTTPConnection::parse_process() {
@@ -171,14 +246,14 @@ HTTPConnection::HttpCode HTTPConnection::parse_process() {
                     return BAD_REQUEST;
                 }
                 else if (ret == GET_REQUEST) {
-                    do_request();
+                    return do_request();
                 }
-                break ;
+                break;
             }
             case CHECK_STATE_CONTENT: {
                 ret = parse_content(text);
                 if (ret == GET_REQUEST) {
-                    do_request();
+                    return do_request();
                 }
                 line_status = LINE_OPEN;
                 break;
@@ -206,7 +281,7 @@ HTTPConnection::HttpCode HTTPConnection::do_request() {
     if (!(file_stat_.st_mode & S_IROTH)) {
         return FORBIDDEN_REQUEST;
     }
-    
+
     // 判断是否是目录
     if (S_ISDIR(file_stat_.st_mode)) {
         return BAD_REQUEST;
@@ -214,7 +289,8 @@ HTTPConnection::HttpCode HTTPConnection::do_request() {
     //以只读方式打开文件
     int fd = open(real_file_.c_str(), O_RDONLY);
     //创建内存映射
-    file_address_ = (char*) mmap(0, file_stat_.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    file_address_ =
+        (char*) mmap(0, file_stat_.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     return FILE_REQUEST;
 }
@@ -344,11 +420,123 @@ HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
         else {
             return BAD_REQUEST;
         }
-        
     }
 }
 
 HTTPConnection::HttpCode HTTPConnection::parse_content(
     const std::string& text) {
     return GET_REQUEST;
+}
+
+bool HTTPConnection::response_process(HttpCode ret) {
+    switch (ret) {
+        case INTERNAL_ERROR: {
+            add_status(500, error_500_title);
+            add_headers(strlen(error_500_form));
+            if (!add_content(error_500_form)) {
+                return false;
+            }
+            break;
+        }
+        case BAD_REQUEST: {
+            add_status(400, error_400_title);
+            add_headers(strlen(error_400_form));
+            if (!add_content(error_400_form)) {
+                return false;
+            }
+            break ;
+        }
+        case NO_RESOURCE: {
+            add_status(404, error_404_title);
+            add_headers(strlen(error_404_form));
+            if (!add_content(error_404_form)) {
+                return false;
+            }
+            break ;
+        }
+        case FORBIDDEN_REQUEST: {
+            add_status(403, error_403_title);
+            add_headers(strlen(error_403_form));
+            if (!add_content(error_403_form)) {
+                return false;
+            }
+            break ;
+        }
+        case FILE_REQUEST: {
+            add_status(200, ok_200_title);
+            add_headers(file_stat_.st_size);
+            io_vec_[0].iov_base = write_buffer;
+            io_vec_[0].iov_len = write_index;
+            io_vec_[1].iov_base = file_address_;
+            io_vec_[1].iov_len = file_stat_.st_size;
+            io_vec_count = 2;
+            bytes_to_send = io_vec_[0].iov_len + io_vec_[1].iov_len;
+            return true;
+        }
+        default: {
+            return false;
+        }
+    }
+    io_vec_[0].iov_base = write_buffer;
+    io_vec_[1].iov_len = write_index;
+    io_vec_count = 1;
+    bytes_to_send = io_vec_[0].iov_len;
+    return true;
+}
+
+bool HTTPConnection::add_response(const char* format, ...) {
+    if (write_index >= WRITE_BUFFER_SIZE) {
+        return false;
+    }
+    va_list arg_list;
+    va_start(arg_list, format);
+    int len = vsnprintf(write_buffer + write_index,
+                        WRITE_BUFFER_SIZE - write_index, format, arg_list);
+    if (len > WRITE_BUFFER_SIZE - write_index - 1) {
+        return false;
+    }
+    // 实际还写了\0，位置多加1
+    write_index += len + 1;
+    va_end(arg_list);
+    return true;
+}
+
+bool HTTPConnection::add_status(int status, const char* title) {
+    return add_response("%s %d %s\r\n", "HTTP/1.1", status, title);
+}
+
+bool HTTPConnection::add_headers(int content_length) {
+    add_content_length(content_length);
+    add_content_type();
+    add_connection();
+    add_blank_line();
+}
+
+bool HTTPConnection::add_content_length(int content_length) {
+    return add_response("Content-Length: %d\r\n", content_length);
+}
+
+bool HTTPConnection::add_content_type() {
+    return add_response("Content_Type: %s\r\n", "text/html");
+}
+
+bool HTTPConnection::add_connection() {
+    return add_response("Connection: %d\r\n",
+                        keep_alive_ ? "keep-alive" : "close");
+}
+
+bool HTTPConnection::add_blank_line() {
+    return add_response("%s", "\r\n");
+}
+
+bool HTTPConnection::add_content(const char* content) {
+    return add_response("%s", content);
+}
+
+void HTTPConnection::unmap() {
+    if (file_address_) {
+        munmap(file_address_, file_stat_.st_size);
+        // 空指针的地址为0
+        file_address_ = 0;
+    }
 }

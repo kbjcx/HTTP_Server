@@ -8,6 +8,8 @@
 #include <iostream>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <stdarg.h>
+#include <sys/uio.h>
 
 class HTTPConnection {
 public:
@@ -69,8 +71,16 @@ private:
     struct stat file_stat_;
     // 内存映射首地址
     char* file_address_;
+    // 读缓冲区当前位置
+    int write_index;
+    int bytes_to_send;
+    int bytes_have_send;
+    struct iovec io_vec_[2];
+    int io_vec_count;
 private:
     void init();
+    void unmap();
+    // 解析请求相关函数
     HttpCode parse_process(); // 解析请求
     HttpCode parse_request(const std::string& text); // 解析请求首行
     HttpCode parse_header(const std::string& text); // 解析请求头
@@ -79,6 +89,16 @@ private:
     LineStatus parse_line(); // 获取一行的数据选择交给请求行、请求头还是请求体
     inline char* get_line();
     HttpCode do_request();
+    // 响应请求相关函数
+    bool response_process(HttpCode ret);
+    bool add_response(const char* format, ...);
+    bool add_status(int status, const char* title);
+    bool add_headers(int content_length);
+    bool add_content_length(int content_length);
+    bool add_content_type();
+    bool add_connection();
+    bool add_blank_line();
+    bool add_content(const char* content);
 };
 
 #endif
