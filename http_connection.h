@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <stdarg.h>
 #include <sys/uio.h>
+#include <cstdio>
 
 class HTTPConnection {
 public:

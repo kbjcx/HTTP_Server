@@ -6,6 +6,6 @@ set(CMAKE_CXX_STANDARD 11)
 link_libraries(pthread)
 include_directories(./)
 
-set(server main.cpp locker.cpp http_connection.cpp)
+set(server main.cpp locker.cpp http_connection.cpp timer.cpp)
 
 add_executable(server ${server})

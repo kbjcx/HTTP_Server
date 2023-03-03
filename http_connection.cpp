@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <regex>
 
-const char* RootPath = "/home/llz/CPP/resources";
+const char* RootPath = "/home/llz/CPP";
 
 // 定义HTTP响应的一些状态信息
 const char* ok_200_title = "OK";
@@ -176,6 +176,7 @@ bool HTTPConnection::write() {
             return false;
         }
         else {
+            bytes_have_send += temp;
             // 判断响应头有没有发送完
             if (bytes_have_send >= io_vec_[0].iov_len) {
                 io_vec_[0].iov_len = 0;
@@ -187,7 +188,6 @@ bool HTTPConnection::write() {
                 io_vec_[0].iov_base = write_buffer + bytes_have_send;
                 io_vec_[0].iov_len = write_index - bytes_have_send;
             }
-            bytes_have_send += temp;
             if (bytes_have_send >= bytes_to_send) {
                 // 响应成功
                 unmap();
@@ -273,6 +273,7 @@ char* HTTPConnection::get_line() {
 HTTPConnection::HttpCode HTTPConnection::do_request() {
     printf("do request\n");
     real_file_ = RootPath + url;
+    std::cout << real_file_ << std::endl;
     // 获取文件相关状态信息
     if (stat(real_file_.c_str(), &file_stat_) == -1) {
         return NO_RESOURCE;
@@ -367,7 +368,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_request(
 }
 
 HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
-    std::cout << text.size() << std::endl;
+    // std::cout << text.size() << std::endl;
     if (text.size() == 0) {
         // 空行，请求头结束
         // 如果存在消息体可以读
@@ -388,7 +389,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
                 if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
                     if (value.str() == "keep-alive") {
                         keep_alive_ = true;
-                        std::cout << text << std::endl;
+                        // std::cout << text << std::endl;
                     }
                 }
                 else {
@@ -398,7 +399,7 @@ HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
             else if (key[0] == "Content-Length") {
                 if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
                     content_length_ = atol(value.str().c_str());
-                    std::cout << text << std::endl;
+                    // std::cout << text << std::endl;
                 }
                 else {
                     return BAD_REQUEST;
@@ -407,15 +408,15 @@ HTTPConnection::HttpCode HTTPConnection::parse_header(const std::string& text) {
             else if (key.str() == "Host") {
                 if (std::regex_search(text, value, std::regex("([^\\s])*$"))) {
                     host_ = value.str();
-                    std::cout << text << std::endl;
+                    // std::cout << text << std::endl;
                 }
                 else {
                     return BAD_REQUEST;
                 }
             }
-            else {
-                printf("Oops! Unknown header: %s\n", text.c_str());
-            }
+//            else {
+//                printf("Oops! Unknown header: %s\n", text.c_str());
+//            }
         }
         else {
             return BAD_REQUEST;
@@ -495,8 +496,8 @@ bool HTTPConnection::add_response(const char* format, ...) {
     if (len > WRITE_BUFFER_SIZE - write_index - 1) {
         return false;
     }
-    // 实际还写了\0，位置多加1
-    write_index += len + 1;
+    // 实际还写了\0，因此需要write_index重新覆写\0，以免请求头断开
+    write_index += len;
     va_end(arg_list);
     return true;
 }
@@ -521,7 +522,7 @@ bool HTTPConnection::add_content_type() {
 }
 
 bool HTTPConnection::add_connection() {
-    return add_response("Connection: %d\r\n",
+    return add_response("Connection: %s\r\n",
                         keep_alive_ ? "keep-alive" : "close");
 }
 
