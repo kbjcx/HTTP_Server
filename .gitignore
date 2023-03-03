@@ -1,3 +1,6 @@
 # 项目排除路径
 /build/
 /.idea/
+/.vscode/
+.clang-format
+.clang-tidy
