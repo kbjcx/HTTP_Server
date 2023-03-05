@@ -1,6 +1,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <signal.h>
+#include <csignal>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -9,25 +9,53 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cassert>
 
 #include "http_connection.h"
 #include "thread_pool.h"
+#include "timer.h"
 
 #define THREAD_NUM 8
 #define MAX_REQUEST_NUM 1024
 #define MAX_FD 65535
 #define MAX_EVENTS 10000
 
+static int pipefd[2];
+static SortTimerList timer_list;
+
 extern void addfd(int epoll_fd, int fd, bool one_shot, bool ET);
 extern void delfd(int epoll_fd, int fd);
 
-void add_sig(int sig, void (*handler)(int)) {
+void add_sig(int sig, void (*handler)(int), int restart) {
     struct sigaction sa;
     bzero(&sa, sizeof(sa));
     sa.sa_flags = 0;
+    if (restart) {
+        sa.sa_flags |= SA_RESTART;
+    }
     sa.sa_handler = handler;
+    // 信号处理时屏蔽所有信号
     sigfillset(&sa.sa_mask);
     sigaction(sig, &sa, nullptr);
+}
+
+// 可重入性：中断后再次进入该函数，环境变量与之前相同，不会丢失数据。
+void sig_handler(int sig) {
+    // Linux中系统调用的错误都存储于errno中，errno由操作系统维护，存储就近发生的错误。
+    // 下一次的错误码会覆盖掉上一次的错误，为保证函数的可重入性，保留原来的errno
+    int saved_errno = errno;
+    int msg = sig;
+    send(pipefd[1], (char*) &msg, 1, 0);
+    errno = saved_errno;
+}
+
+void timer_handler() {
+    timer_list.tick();
+    alarm(TIMESLOT);
+}
+
+void callback(HTTPConnection* user) {
+    user->close_connection();
 }
 
 int main(int argc, char* argv[]) {
@@ -37,7 +65,9 @@ int main(int argc, char* argv[]) {
     }
 
     // 注册信号监听
-    add_sig(SIGPIPE, SIG_IGN);
+    add_sig(SIGPIPE, SIG_IGN, false);
+    add_sig(SIGALRM, sig_handler, true);
+    add_sig(SIGTERM, sig_handler, true);
 
     // 创建线程池
     ThreadPool<HTTPConnection>* pool = nullptr;
@@ -81,11 +111,17 @@ int main(int argc, char* argv[]) {
     epoll_event events[MAX_EVENTS];
     int epoll_fd = epoll_create(1);
 
+    // 创建信号通知管道
+    assert(socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd) != -1);
+    addfd(epoll_fd, pipefd[0], false, false);
     // 添加文件描述符
     addfd(epoll_fd, server_sockfd, false, false);
     HTTPConnection::epoll_fd = epoll_fd;
 
-    while (true) {
+    bool timeout = false;
+    bool stop_server = false;
+    alarm(TIMESLOT);
+    while (stop_server == false) {
         int count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if ((count == -1) && (errno != EINTR)) {
             printf("epoll failure\n");
@@ -113,19 +149,61 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
                 // 新的客户初始化，放到数组中
+                UtilTimer* timer = new UtilTimer();
                 users[client_fd].init(client_fd, client_addr);
+                users[client_fd].timer = timer;
+                timer->init();
+                timer->http_connection_ = &users[client_fd];
+                timer->callback = callback;
+                timer_list.add_timer(timer);
             }
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                 // 对方异常断开
+                timer_list.del_timer(users[sock_fd].timer);
                 users[sock_fd].close_connection();
+            }
+            else if (events[i].events & EPOLLIN && sock_fd == pipefd[0]) {
+                // 捕获到信号
+                int ret;
+                char signals[1024];
+                ret = recv(pipefd[0], signals, sizeof(signals), 0);
+                if (ret == -1) {
+                    continue;
+                }
+                else if (ret == 0) {
+                    continue;
+                }
+                else {
+                    for (int i = 0; i < ret; ++i) {
+                        switch (signals[i]) {
+                            case SIGALRM: {
+                                // 记录下有超时请求需要处理，但不立即处理，因为定时任务的优先级不高，需要优先处理其他事件
+                                timeout = true;
+                                break;
+                            }
+                            case SIGTERM: {
+                                stop_server = true;
+                                break;
+                            }
+                            default: {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             else if (events[i].events & EPOLLIN) {
                 // 读事件
                 if (users[sock_fd].read()) {
                     // 一次性读完数据
                     pool->append(users + sock_fd);
+                    time_t cur_time = time(nullptr);
+                    users[sock_fd].timer->expire_ = cur_time + 3 * TIMESLOT;
+                    printf("adjust time\n");
+                    timer_list.adjust_timer(users[sock_fd].timer);
                 }
                 else {
+                    timer_list.del_timer(users[sock_fd].timer);
                     users[sock_fd].close_connection();
                 }
             }
@@ -133,12 +211,20 @@ int main(int argc, char* argv[]) {
                 // 写事件
                 if (users[sock_fd].write()) {
                     // 一次性写完
+                    time_t cur_time = time(nullptr);
+                    users[sock_fd].timer->expire_ = cur_time + 3 * TIMESLOT;
+                    printf("adjust time\n");
+                    timer_list.adjust_timer(users[sock_fd].timer);
                     continue;
                 }
                 else {
                     users[sock_fd].close_connection();
                 }
             }
+        }
+        if (timeout) {
+            timer_handler();
+            timeout = false;
         }
     }
     close(epoll_fd);

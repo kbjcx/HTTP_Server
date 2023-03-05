@@ -99,3 +99,25 @@ void SortTimerList::put(UtilTimer* timer) {
     tail = timer;
     tail->next = nullptr;
 }
+
+void SortTimerList::tick() {
+    printf("time tick\n");
+    if (head == nullptr) {
+        return ;
+    }
+    time_t cur_time = time(nullptr);
+    UtilTimer* tmp = head;
+    while (tmp != nullptr) {
+        if (cur_time < tmp->expire_) {
+            // 如果当前没有超时，那么后面的也不会超时
+            break;
+        }
+        tmp->callback(tmp->http_connection_);
+        head = tmp->next;
+        if (head != nullptr) {
+            head->prev = nullptr;
+        }
+        delete tmp;
+        tmp = head;
+    }
+}

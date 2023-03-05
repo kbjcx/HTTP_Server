@@ -77,7 +77,7 @@ void modfd(int epoll_fd, int fd, uint32_t ev) {
     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
 }
 
-HTTPConnection::HTTPConnection() = default;
+HTTPConnection::HTTPConnection()  = default;
 
 HTTPConnection::~HTTPConnection() = default;
 
@@ -540,4 +540,8 @@ void HTTPConnection::unmap() {
         // 空指针的地址为0
         file_address_ = 0;
     }
+}
+
+void UtilTimer::init() {
+    expire_ = time(nullptr) + 3 * TIMESLOT;
 }

@@ -12,6 +12,24 @@
 #include <sys/uio.h>
 #include <cstdio>
 
+#define TIMESLOT 5
+
+class HTTPConnection;
+// 定时器类
+class UtilTimer {
+public:
+    UtilTimer() : next(nullptr), prev(nullptr), expire_(0), http_connection_(nullptr) {};
+    void init();
+
+public:
+    time_t expire_;// 任务超时时间
+    // 任务回调函数，处理客户数据，有定时器的执行者传递给回调函数
+    void (*callback)(HTTPConnection*);
+    HTTPConnection* http_connection_;
+    UtilTimer* next;
+    UtilTimer* prev;
+};
+
 class HTTPConnection {
 public:
     enum Method { GET = 0, POST, HEAD, PUT, DELETE, TRACE, OPTIONS, CONNECT };
@@ -36,6 +54,8 @@ public:
     static int user_count;
     static const int READ_BUFFER_SIZE = 2048;
     static const int WRITE_BUFFER_SIZE = 1024;
+    // 定时器类
+    UtilTimer* timer;
 
 public:
     HTTPConnection();
@@ -51,7 +71,7 @@ public:
 
 private:
     // http通信套接字
-    int sock_fd{};
+    int sock_fd;
     // http通信地址
     sockaddr_in addr{};
     // 缓冲
